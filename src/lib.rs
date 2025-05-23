@@ -664,6 +664,57 @@ impl YoutubeDl {
         })
     }
 
+    #[cfg(not(windows))]
+    fn run_process_with_python(&self, args: Vec<&str>, python: impl AsRef<Path>) -> Result<ProcessResult, Error> {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        use wait_timeout::ChildExt;
+
+        let path = self.path();
+        #[cfg(not(target_os = "windows"))]
+        let mut child = Command::new(python.as_ref())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .args(vec![path.to_string_lossy().as_ref()].into_iter().chain(args))
+            .spawn()?;
+        #[cfg(target_os = "windows")]
+        let mut child = Command::new(python)
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .args(vec![path.to_string_lossy().as_ref()].into_iter().chain(args))
+            .spawn()?;
+
+        // Continually read from stdout so that it does not fill up with large output and hang forever.
+        // We don't need to do this for stderr since only stdout has potentially giant JSON.
+        let mut stdout = Vec::new();
+        let child_stdout = child.stdout.take();
+        std::io::copy(&mut child_stdout.unwrap(), &mut stdout)?;
+
+        let exit_code = if let Some(timeout) = self.process_timeout {
+            match child.wait_timeout(timeout)? {
+                Some(status) => status,
+                None => {
+                    child.kill()?;
+                    return Err(Error::ProcessTimeout);
+                }
+            }
+        } else {
+            child.wait()?
+        };
+
+        let mut stderr = vec![];
+        if let Some(mut reader) = child.stderr {
+            reader.read_to_end(&mut stderr)?;
+        }
+
+        Ok(ProcessResult {
+            stdout,
+            stderr,
+            exit_code,
+        })
+    }
+
     #[cfg(feature = "tokio")]
     async fn run_process_async(&self, args: Vec<&str>) -> Result<ProcessResult, Error> {
         use std::process::Stdio;
@@ -758,6 +809,31 @@ impl YoutubeDl {
         }
     }
 
+    /// Run yt-dlp with the arguments specified through the builder and parse its
+    /// JSON ouput into `YoutubeDlOutput`. Note: This can fail when the JSON output
+    /// is not compatible with the struct definitions in this crate.
+    ///
+    /// Uses the specified version of python to run the executable.
+    #[cfg(not(windows))]
+    pub fn run_with_python(&self, python: impl AsRef<Path>) -> Result<YoutubeDlOutput, Error> {
+        let args = self.process_args();
+        let ProcessResult {
+            stderr,
+            stdout,
+            exit_code,
+        } = self.run_process_with_python(args, python)?;
+
+        if exit_code.success() || self.ignore_errors {
+            self.process_json_output(stdout)
+        } else {
+            let stderr = String::from_utf8(stderr).unwrap_or_default();
+            Err(Error::ExitCode {
+                code: exit_code.code().unwrap_or(1),
+                stderr,
+            })
+        }
+    }
+
     /// Run yt-dlp with the arguments through the builder and parse its JSON output
     /// into a `serde_json::Value`. This is meant as a fallback for when the JSON
     /// output is not compatible with the struct definitions in this crate.
@@ -768,6 +844,32 @@ impl YoutubeDl {
             stdout,
             exit_code,
         } = self.run_process(args)?;
+
+        if exit_code.success() || self.ignore_errors {
+            let value: Value = serde_json::from_reader(stdout.as_slice())?;
+            Ok(value)
+        } else {
+            let stderr = String::from_utf8(stderr).unwrap_or_default();
+            Err(Error::ExitCode {
+                code: exit_code.code().unwrap_or(1),
+                stderr,
+            })
+        }
+    }
+
+    /// Run yt-dlp with the arguments through the builder and parse its JSON output
+    /// into a `serde_json::Value`. This is meant as a fallback for when the JSON
+    /// output is not compatible with the struct definitions in this crate.
+    /// 
+    /// Uses the specified version of python to run the executable.
+    #[cfg(not(windows))]
+    pub fn run_raw_with_python(&self, python: impl AsRef<Path>) -> Result<Value, Error> {
+        let args = self.process_args();
+        let ProcessResult {
+            stderr,
+            stdout,
+            exit_code,
+        } = self.run_process_with_python(args, python)?;
 
         if exit_code.success() || self.ignore_errors {
             let value: Value = serde_json::from_reader(stdout.as_slice())?;
@@ -831,6 +933,18 @@ impl YoutubeDl {
         let folder_str = folder.as_ref().to_string_lossy();
         let args = self.process_download_args(&folder_str);
         self.run_process(args)?;
+
+        Ok(())
+    }
+
+    /// Download the file to the specified destination folder.
+    ///
+    /// Uses the specified version of python to run the executable.
+    #[cfg(not(windows))]
+    pub fn download_to_with_python(&self, folder: impl AsRef<Path>, python: impl AsRef<Path>) -> Result<(), Error> {
+        let folder_str = folder.as_ref().to_string_lossy();
+        let args = self.process_download_args(&folder_str);
+        self.run_process_with_python(args, python)?;
 
         Ok(())
     }
