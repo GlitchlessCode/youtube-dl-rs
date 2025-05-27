@@ -675,15 +675,11 @@ impl YoutubeDl {
         let mut child = Command::new(python.as_ref())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .args(vec![path.to_string_lossy().as_ref()].into_iter().chain(args))
+            .arg(path)
+            .args(args)
             .spawn()?;
         #[cfg(target_os = "windows")]
-        let mut child = Command::new(python)
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .args(vec![path.to_string_lossy().as_ref()].into_iter().chain(args))
-            .spawn()?;
+        unreachable!();
 
         // Continually read from stdout so that it does not fill up with large output and hang forever.
         // We don't need to do this for stderr since only stdout has potentially giant JSON.
